@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"When the user mentions super-design, design audit, UX review, accessibility review, design critique, competitor analysis, WCAG check, Core Web Vitals audit, usability audit, or says anything about auditing their website's design or UX — you MUST invoke the super-design skill. Do not attempt to audit manually, do not improvise a checklist, do not suggest tools. Read .claude/skills/super-design/SKILL.md first, then follow its entry flow precisely. The skill has evidence requirements (SHOT+QUOTE+SEL+VAL) that manual auditing cannot satisfy.\n\nIf the user asks for fixes after an audit, invoke the sd-fix agent. Every fix must cite a finding ID in its commit message. Never edit files outside finding.files_affected without risk reclassification."}}
+EOF

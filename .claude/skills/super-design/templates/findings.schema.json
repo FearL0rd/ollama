@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "super-design/findings.schema.json",
+  "type": "object",
+  "required": ["session_id", "findings"],
+  "properties": {
+    "session_id": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id","category","rule","impact","risk_for_fix","files_affected","dom_selector","page_url","viewport","screenshot_path","snapshot_path","snapshot_quote","computed_style_excerpt","severity","finding"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^F-\\d{4,}$" },
+          "category": { "enum": ["a11y","design","ux","perf","baymard","heuristic"] },
+          "rule": { "type": "string" },
+          "wcag_criterion": { "type": "string" },
+          "nielsen_heuristic": { "type": "string" },
+          "impact": { "enum": ["minor","moderate","serious","critical"] },
+          "severity": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "risk_for_fix": { "enum": ["TRIVIAL","LOW","MEDIUM","HIGH"] },
+          "files_affected": { "type": "array", "items": { "type": "string" } },
+          "page_url": { "type": "string" },
+          "viewport": {
+            "type": "object",
+            "required": ["name","w","h"],
+            "properties": {
+              "name": { "type": "string" },
+              "w": { "type": "integer" },
+              "h": { "type": "integer" }
+            }
+          },
+          "screenshot_path": { "type": "string" },
+          "snapshot_path": { "type": "string" },
+          "snapshot_quote": { "type": "string" },
+          "dom_selector": { "type": "string" },
+          "computed_style_excerpt": { "type": "object" },
+          "evidence_hex_fg": { "type": "string" },
+          "evidence_hex_bg": { "type": "string" },
+          "evidence_contrast_ratio": { "type": "number" },
+          "evidence_px": { "type": "object" },
+          "suggested_fix": {
+            "type": "object",
+            "properties": {
+              "strategy": { "type": "string" },
+              "template_id": { "type": "string" },
+              "value_hint": { "type": "string" }
+            }
+          },
+          "finding": { "type": "string" },
+          "first_seen_at": { "type": "string", "format": "date-time" },
+          "status": { "enum": ["new","persisted","resolved"] }
+        }
+      }
+    }
+  }
+}

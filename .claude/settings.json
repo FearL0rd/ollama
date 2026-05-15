@@ -1,0 +1,125 @@
+{
+	"model": "opus",
+	"max_tokens": 8192,
+	"max_turns": 100,
+
+	"attribution": {
+		"commit": "",
+		"pr": ""
+	},
+
+	"enableAllProjectMcpServers": true,
+
+	"extraKnownMarketplaces": {
+		"claude-plugins-official": {
+			"source": {
+				"source": "github",
+				"repo": "anthropics/claude-plugins-official"
+			}
+		}
+	},
+
+	"enabledPlugins": {
+		"typescript-lsp@claude-plugins-official": true,
+		"security-guidance@claude-plugins-official": true,
+		"code-review@claude-plugins-official": true,
+		"commit-commands@claude-plugins-official": true,
+		"frontend-design@claude-plugins-official": true,
+		"superpowers@claude-plugins-official": true,
+		"ralph-loop@claude-plugins-official": true,
+		"context7@claude-plugins-official": true,
+		"code-simplifier@claude-plugins-official": true
+	},
+
+	"hooks": {
+		"SessionStart": [
+			{
+				"matcher": "startup|resume|clear|compact",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/super-design-session-start.sh\""
+					},
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/e2e-audit-session-start.sh\""
+					},
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/research-session-start.sh\""
+					},
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/mcp-usage-session-start.sh\""
+					},
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/git-context-session-start.sh\""
+					}
+				]
+			}
+		],
+		"PostToolUse": [
+			{
+				"matcher": "Write|Edit",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/format-on-edit.sh\""
+					}
+				]
+			}
+		],
+		"Stop": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/quality-gate-stop.sh\""
+					}
+				]
+			}
+		]
+	},
+
+	"permissions": {
+		"mode": "strict",
+		"allowed_tools": [
+			"file_read",
+			"file_write",
+			"file_edit",
+			"bash_grep",
+			"bash_find",
+			"bash_ls",
+			"bash_bun",
+			"bash_git",
+			"web_search"
+		],
+		"disallowed_tools": [
+			"bash_rm_rf",
+			"bash_sudo",
+			"bash_chmod",
+			"bash_chown",
+			"file_delete_recursive"
+		],
+		"allowed_directories": [
+			".",
+			"app",
+			"components",
+			"lib",
+			"server",
+			"tests",
+			"docs",
+			"types",
+			".claude"
+		],
+		"protected_files": [".env", ".env.local", ".env.production", "bun.lockb"],
+		"allow": [
+			"Bash(bun run typecheck:*)",
+			"Bash(git add:*)",
+			"Bash(git commit:*)",
+			"Bash(bun .claude/scripts/*)",
+			"Bash(claude mcp:*)"
+		]
+	}
+}

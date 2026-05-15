@@ -1,0 +1,64 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"$id": "https://hakutaku.dev/schema/research-state-0.1.0.json",
+	"title": "research-state JSONL entry",
+	"description": "One JSON line per research run appended to docs/research/.research-state.jsonl",
+	"type": "object",
+	"required": ["topic_slug", "ts", "verdict"],
+	"additionalProperties": true,
+	"properties": {
+		"topic_slug": {
+			"type": "string",
+			"pattern": "^[a-z0-9][a-z0-9-]{1,59}$",
+			"description": "Kebab-case slug; matches /docs/research/<slug>.md filename."
+		},
+		"ts": {
+			"type": "string",
+			"format": "date-time",
+			"description": "UTC ISO-8601 timestamp of run completion."
+		},
+		"session_id": {
+			"type": "string",
+			"description": "Session directory name under docs/research/.cache/sessions/"
+		},
+		"verdict": {
+			"type": "string",
+			"enum": ["pass", "pass-with-warnings", "fail", "abort", "reuse"]
+		},
+		"content_type_bucket": {
+			"type": "string",
+			"enum": ["fast", "medium", "slow", "permanent", "unknown"]
+		},
+		"freshness_status": {
+			"type": "string",
+			"enum": ["fresh", "aging", "stale", "outdated", "missing"]
+		},
+		"playbook": {
+			"type": "string",
+			"enum": [
+				"ux-design",
+				"library-evaluation",
+				"api-integration",
+				"architectural-decision",
+				"market-competitive",
+				"academic-literature",
+				"news-current-events",
+				"security",
+				"pricing-cost",
+				"other"
+			]
+		},
+		"domain": { "type": "string" },
+		"lang": { "type": "string", "default": "en" },
+		"queries_used": { "type": "integer", "minimum": 0 },
+		"sources_cited": { "type": "integer", "minimum": 0 },
+		"findings_count": { "type": "integer", "minimum": 0 },
+		"disagreements_count": { "type": "integer", "minimum": 0 },
+		"verify_pass": { "type": "integer", "minimum": 0 },
+		"verify_stale": { "type": "integer", "minimum": 0 },
+		"verify_fail": { "type": "integer", "minimum": 0 },
+		"duration_seconds": { "type": "number" },
+		"doc_path": { "type": "string" },
+		"adr_path": { "type": ["string", "null"] }
+	}
+}

@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://start-vibing.dev/schema/e2e-audit-findings-0.2.0.json",
+  "title": "e2e-audit findings v0.2.0",
+  "description": "Output contract for e2e-audit. Every finding carries an SHOT+TRACE+ASSERT+SOURCE quad; aggregate (meta) findings are exempt.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["id", "rule", "severity", "summary", "files_affected"],
+    "additionalProperties": true,
+    "properties": {
+      "id": {
+        "type": "string",
+        "pattern": "^E2E-\\d{4}$",
+        "description": "Stable finding id. Format E2E-NNNN. Allocate sequentially per session."
+      },
+      "rule": {
+        "type": "string",
+        "description": "Machine-matchable rule slug (kebab-case). Examples: auth-flow-broken, api-500, rbac-bypass, console-error, uncovered-route, coverage-gap-trpc, test-drift, post-run-feedback."
+      },
+      "category": {
+        "type": "string",
+        "enum": [
+          "auth",
+          "api-contract",
+          "rbac",
+          "console",
+          "server-crash",
+          "coverage-gap",
+          "test-drift",
+          "flake",
+          "ui-regression",
+          "a11y",
+          "meta"
+        ]
+      },
+      "severity": {
+        "type": "string",
+        "enum": ["critical", "high", "medium", "low", "info"]
+      },
+      "summary": { "type": "string", "minLength": 3 },
+      "detail":  { "type": "string" },
+      "files_affected": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Source files this finding implicates. sd-fix-style guards MUST prevent edits outside this list unless risk is reclassified."
+      },
+      "viewport": {
+        "type": "string",
+        "enum": ["mobile", "tablet", "desktop"],
+        "description": "Optional — only set when a viewport-specific flow reproduced the issue."
+      },
+      "test_file":   { "type": "string", "description": "Path to the spec that reproduced this (if any)." },
+      "test_title":  { "type": "string", "description": "Title of the failing/passing test." },
+
+      "screenshot_path": { "type": "string", "description": "SHOT — non-empty PNG captured at the assertion moment." },
+      "trace_path":      { "type": "string", "description": "TRACE — Playwright trace.zip or equivalent recording." },
+      "assertion":       { "type": "string", "description": "ASSERT — the literal assertion that fired, e.g. `expect(response.status()).toBe(200)` observed 500." },
+      "source_file":     { "type": "string", "description": "SOURCE — the source file the assertion implicates (router.ts, page.tsx, action.ts, ...)." },
+      "source_quote":    { "type": "string", "description": "Optional verbatim quote from source_file explaining the implicated code." },
+
+      "http": {
+        "type": "object",
+        "description": "Optional — populated for api-contract / server-crash rules.",
+        "properties": {
+          "method":   { "type": "string" },
+          "path":     { "type": "string" },
+          "status":   { "type": "integer" },
+          "response_snippet": { "type": "string", "maxLength": 512 },
+          "content_type":     { "type": "string" }
+        }
+      },
+      "console_messages": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["level", "text"],
+          "properties": {
+            "level": { "type": "string", "enum": ["log", "warning", "error", "debug", "info"] },
+            "text":  { "type": "string" },
+            "url":   { "type": "string" },
+            "line":  { "type": "integer" }
+          }
+        }
+      },
+
+      "suggested_fix": {
+        "type": "object",
+        "description": "Advisory only. sd-fix-style agents may consume this.",
+        "properties": {
+          "kind":  { "type": "string", "enum": ["add-test", "fix-route", "fix-zod", "fix-rbac", "fix-auth", "add-fixture", "advisory"] },
+          "notes": { "type": "string" },
+          "files": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}
