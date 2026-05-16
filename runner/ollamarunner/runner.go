@@ -85,6 +85,7 @@ type Sequence struct {
 
 	// sampler with transforms to run on generated logits
 	sampler sample.Sampler
+	temperature float32
 
 	// channel to send back the embedding if embedding only
 	embedding chan []float32
@@ -120,6 +121,7 @@ type NewSequenceParams struct {
 	stop        []string
 	numKeep     int32
 	sampler     sample.Sampler
+	temperature float32
 	embedding   bool
 	shift       bool
 	truncate    bool
@@ -201,6 +203,7 @@ func (s *Server) NewSequence(prompt string, images []llm.ImageData, params NewSe
 		quit:             make(chan bool, 1),
 		embedding:        make(chan []float32, 1),
 		sampler:          params.sampler,
+		temperature: params.temperature,
 		embeddingOnly:    params.embedding,
 		stop:             params.stop,
 		numKeep:          params.numKeep,
@@ -779,6 +782,43 @@ func (s *Server) computeBatch(activeBatch batchState) {
 
 		nextBatchTokens[i].Token = token
 
+		// Check if DFlash speculative decoding should take over this sequence.
+		// Only do this on the first decoded token (after prompt prefill is complete).
+		if seq.numPredicted == 1 && s.useDFlash {
+			mode, reason := s.dflashGate(seq.temperature)
+			if mode.enabled() {
+				slog.Info("DFlash speculative decode enabled", "mode", mode, "seq", i,
+					"temperature", seq.temperature, "block_size", s.draftModel.(DFlashDraftModel).BlockSize())
+
+				// Emit the first decoded token before handing off to DFlash
+				piece, err := s.model.(tokenizer.Tokenizer).Decode([]int32{token})
+				if err != nil {
+					panic("failed to decode token")
+				}
+				seq.pendingResponses = append(seq.pendingResponses, piece)
+				flushPending(seq)
+				seq.numPredicted++
+
+				// Detach the sequence from the normal batch pipeline.
+				// runDFlashDecode will handle all future tokens for this sequence.
+				seqIdx := i
+				go func() {
+					if err := s.runDFlashDecode(context.Background(), seq); err != nil {
+						slog.Error("DFlash decode failed", "error", err)
+					}
+					s.mu.Lock()
+					s.removeSequence(seqIdx, llm.DoneReasonStop)
+					s.mu.Unlock()
+				}()
+				// Mark the sequence as nil in the batch so the normal pipeline
+				// does not try to process it further
+				nextBatchTokens[i] = nil
+				continue
+			} else {
+				slog.Info("DFlash speculative decode disabled", "reason", reason)
+			}
+		}
+
 		// if it's an end of sequence token, break
 		if s.model.(tokenizer.Tokenizer).Is(token, tokenizer.SpecialEOS) {
 			// TODO (jmorganca): we should send this back
@@ -916,6 +956,7 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 		stop:        req.Options.Stop,
 		numKeep:     int32(req.Options.NumKeep),
 		sampler:     sampler,
+		temperature: req.Options.Temperature,
 		embedding:   false,
 		shift:       req.Shift,
 		truncate:    req.Truncate,
@@ -1336,6 +1377,10 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 		s.usePFlash = req.UsePFlash
 		s.useMegakernel = req.UseMegakernel
 		if s.draftModelPath != "" {
+			// Auto-enable DFlash when draft model is provided without explicit flags
+			if !s.useDFlash && !s.usePFlash && !s.useMegakernel {
+				s.useDFlash = true
+			}
 			slog.Info("draft model configured", "path", s.draftModelPath, "dflash", s.useDFlash, "pflash", s.usePFlash, "megakernel", s.useMegakernel)
 		}
 
@@ -1356,13 +1401,13 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("failed to initialize model: %v", err), http.StatusInternalServerError)
 			return
 		}
-	}
 
 		// Attempt to load draft model for speculative decoding
-	if s.draftModelPath != "" && s.useDFlash {
-		if err := s.loadDraftModel(s.draftModelPath, params); err != nil {
-			slog.Warn("failed to load draft model, continuing without speculative decoding",
-				"path", s.draftModelPath, "error", err)
+		if s.draftModelPath != "" && s.useDFlash {
+			if err := s.loadDraftModel(s.draftModelPath, params); err != nil {
+				slog.Warn("failed to load draft model, continuing without speculative decoding",
+					"path", s.draftModelPath, "error", err)
+			}
 		}
 	}
 

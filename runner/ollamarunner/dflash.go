@@ -6,12 +6,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/kvcache"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/model/input"
-	"github.com/ollama/ollama/sample"
 	"github.com/ollama/ollama/tokenizer"
 )
 
@@ -74,7 +72,7 @@ func (m dflashDecodeMode) enabled() bool {
 
 // dflashGate determines whether DFlash speculative decoding should be
 // used for the given request.
-func (s *Server) dflashGate(opts *api.Options) (dflashDecodeMode, string) {
+func (s *Server) dflashGate(temperature float32) (dflashDecodeMode, string) {
 	if s.draftModel == nil {
 		return dflashDisabled, "no_draft"
 	}
@@ -87,7 +85,7 @@ func (s *Server) dflashGate(opts *api.Options) (dflashDecodeMode, string) {
 		return dflashDisabled, "target_not_dflash"
 	}
 
-	if opts.Temperature > 0 {
+	if temperature > 0 {
 		return dflashSample, ""
 	}
 
@@ -109,8 +107,7 @@ func (s *Server) dflashGate(opts *api.Options) (dflashDecodeMode, string) {
 func (s *Server) runDFlashDecode(
 	ctx context.Context,
 	seq *Sequence,
-	sampler sample.Sampler,
-	opts *api.Options,
+	initialToken int32,
 ) error {
 	target, ok := s.model.(DFlashTargetModel)
 	if !ok {
@@ -283,7 +280,7 @@ func (s *Server) runDFlashDecode(
 		vocabSize := len(outputs)
 		targetToken := argmaxToken(outputs, vocabSize)
 
-		for i, draftToken := range draftTokens {
+		for _, draftToken := range draftTokens {
 			// The target's prediction should match the draft token
 			if targetToken != draftToken {
 				// Mismatch: return the target's token as the next token

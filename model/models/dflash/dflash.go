@@ -21,6 +21,7 @@ import (
 
 func init() {
 	model.Register("dflash", New)
+	model.Register("qwen35-dflash-draft", New)
 }
 
 type Options struct {
@@ -158,16 +159,16 @@ func New(c fs.Config) (model.Model, error) {
 	m := Model{
 		Layers: make([]Layer, c.Uint("block_count")),
 		Options: &Options{
-			hiddenSize:           int(c.Uint("hidden_size")),
-			numHeads:             int(c.Uint("num_attention_heads")),
-			numKVHeads:           int(c.Uint("num_key_value_heads")),
-			headDim:              int(c.Uint("head_dim")),
-			intermediateSize:     int(c.Uint("intermediate_size")),
-			eps:                  c.Float("rms_norm_eps"),
-			ropeBase:             c.Float("rope_theta"),
+			hiddenSize:           int(c.Uint("embedding_length")),
+			numHeads:             int(c.Uint("attention.head_count")),
+			numKVHeads:           int(c.Uint("attention.head_count_kv")),
+			headDim:              int(c.Uint("attention.key_length")),
+			intermediateSize:     int(c.Uint("feed_forward_length")),
+			eps:                  c.Float("attention.layer_norm_rms_epsilon"),
+			ropeBase:             c.Float("rope.freq_base"),
 			ropeScale:            1.0,
-			originalContextLength: int(c.Uint("max_position_embeddings")),
-			slidingWindow:        int(c.Uint("sliding_window")),
+			originalContextLength: int(c.Uint("context_length")),
+			slidingWindow:        int(c.Uint("attention.sliding_window")),
 		},
 	}
 
@@ -201,18 +202,18 @@ func New(c fs.Config) (model.Model, error) {
 	}
 
 	// Parse DFlash-specific config from GGUF metadata
-	targetLayerIDsInt32 := c.Ints("dflash_config.target_layer_ids")
-	m.targetLayerIDs = make([]int, len(targetLayerIDsInt32))
-	for i, v := range targetLayerIDsInt32 {
-		m.targetLayerIDs[i] = int(v)
+	nTargetLayers := int(c.Uint("dflash.n_target_layers"))
+	m.targetLayerIDs = make([]int, nTargetLayers)
+	for i := range m.targetLayerIDs {
+		m.targetLayerIDs[i] = i
 	}
-	m.maskTokenID = int32(c.Uint("dflash_config.mask_token_id"))
-	m.blockSize = int32(c.Uint("block_size"))
+	m.maskTokenID = int32(c.Uint("dflash.mask_token_id"))
+	m.blockSize = int32(c.Uint("dflash.block_size"))
 	if m.blockSize == 0 {
 		m.blockSize = 16
 	}
 
-	ropeType := c.String("rope_type")
+	ropeType := c.String("rope.scaling.type")
 	if ropeType == "" {
 		ropeType = c.String("rope_scaling.type")
 	}
