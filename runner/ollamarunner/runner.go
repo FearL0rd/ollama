@@ -386,6 +386,14 @@ type Server struct {
 	// KV cache
 	cache *InputCache
 
+	// draft model for speculative decoding
+	draftModelPath string
+	draftModel     model.Model
+	draftCache     *InputCache
+	useDFlash bool
+	usePFlash     bool
+	useMegakernel bool
+
 	// next sequence for prompt processing to avoid starvation
 	nextSeq int
 
@@ -1246,6 +1254,7 @@ func (s *Server) allocModel(
 
 // closeModel frees all memory associated with a model
 func (s *Server) closeModel() {
+	s.closeDraftModel()
 	s.cache.Close()
 	s.cache = nil
 	if s.model != nil {
@@ -1321,6 +1330,15 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 
 		s.batchSize = req.BatchSize
 
+		// Store speculative decoding options
+		s.draftModelPath = req.DraftModel
+		s.useDFlash = req.UseDFlash
+		s.usePFlash = req.UsePFlash
+		s.useMegakernel = req.UseMegakernel
+		if s.draftModelPath != "" {
+			slog.Info("draft model configured", "path", s.draftModelPath, "dflash", s.useDFlash, "pflash", s.usePFlash, "megakernel", s.useMegakernel)
+		}
+
 		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvSize, req.MultiUserCache)
 		if err != nil {
 			s.closeModel()
@@ -1337,6 +1355,14 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 
 			http.Error(w, fmt.Sprintf("failed to initialize model: %v", err), http.StatusInternalServerError)
 			return
+		}
+	}
+
+		// Attempt to load draft model for speculative decoding
+	if s.draftModelPath != "" && s.useDFlash {
+		if err := s.loadDraftModel(s.draftModelPath, params); err != nil {
+			slog.Warn("failed to load draft model, continuing without speculative decoding",
+				"path", s.draftModelPath, "error", err)
 		}
 	}
 

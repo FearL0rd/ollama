@@ -2,6 +2,7 @@ package models
 
 import (
 	_ "github.com/ollama/ollama/model/models/bert"
+	_ "github.com/ollama/ollama/model/models/dflash"
 	_ "github.com/ollama/ollama/model/models/deepseek2"
 	_ "github.com/ollama/ollama/model/models/deepseekocr"
 	_ "github.com/ollama/ollama/model/models/gemma2"

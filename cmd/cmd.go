@@ -689,6 +689,20 @@ func RunHandler(cmd *cobra.Command, args []string) error {
 		opts.KeepAlive = &api.Duration{Duration: d}
 	}
 
+	// Draft model / speculative decoding flags
+	if draftModel, _ := cmd.Flags().GetString("draft-model"); draftModel != "" {
+		opts.Options["draft_model"] = draftModel
+	}
+	if useDFlash, _ := cmd.Flags().GetBool("use-dflash"); useDFlash {
+		opts.Options["use_dflash"] = true
+	}
+	if usePFlash, _ := cmd.Flags().GetBool("use-pflash"); usePFlash {
+		opts.Options["use_pflash"] = true
+	}
+	if useMegakernel, _ := cmd.Flags().GetBool("use-megakernel"); useMegakernel {
+		opts.Options["use_megakernel"] = true
+	}
+
 	prompts := args[1:]
 	// prepend stdin to the prompt if provided
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
@@ -2332,6 +2346,12 @@ func NewCLI() *cobra.Command {
 
 	runCmd.Flags().Bool("imagegen", false, "Use the imagegen runner for LLM inference")
 	runCmd.Flags().MarkHidden("imagegen")
+
+	// Speculative decoding flags
+	runCmd.Flags().String("draft-model", "", "Path to draft model GGUF for speculative decoding")
+	runCmd.Flags().Bool("use-dflash", false, "Enable DFlash block-diffusion speculative decoding")
+	runCmd.Flags().Bool("use-pflash", false, "Enable PFlash speculative prefill")
+	runCmd.Flags().Bool("use-megakernel", false, "Enable fused megakernel CUDA decode (experimental)")
 
 	stopCmd := &cobra.Command{
 		Use:     "stop MODEL",

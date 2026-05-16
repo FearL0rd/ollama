@@ -172,7 +172,11 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 	opts.NumBatch = min(opts.NumBatch, opts.NumCtx)
 
-	loadRequest := LoadRequest{LoraPath: adapters, KvSize: opts.NumCtx * numParallel, BatchSize: opts.NumBatch, Parallel: numParallel, MultiUserCache: envconfig.MultiUserCache()}
+	loadRequest := LoadRequest{LoraPath: adapters, KvSize: opts.NumCtx * numParallel, BatchSize: opts.NumBatch, Parallel: numParallel, MultiUserCache: envconfig.MultiUserCache(), DraftModel: opts.DraftModel, UseDFlash: opts.UseDFlash, UsePFlash: opts.UsePFlash, UseMegakernel: opts.UseMegakernel}
+
+	if opts.DraftModel != "" {
+		slog.Info("speculative decoding enabled", "draft_model", opts.DraftModel, "dflash", opts.UseDFlash, "pflash", opts.UsePFlash, "megakernel", opts.UseMegakernel)
+	}
 
 	defaultThreads := systemInfo.ThreadCount
 	if opts.NumThread > 0 {
@@ -514,6 +518,12 @@ type LoadRequest struct {
 	NumThreads     int
 	GPULayers      ml.GPULayersList
 	MultiUserCache bool
+
+	// Draft model / speculative decoding options
+	DraftModel    string
+	UseDFlash     bool
+	UsePFlash     bool
+	UseMegakernel bool
 
 	// Legacy fields - not used with the Ollama engine
 	ProjectorPath string

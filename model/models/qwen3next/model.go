@@ -437,6 +437,62 @@ func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
 	return m.Output.Forward(ctx, hiddenStates), nil
 }
 
+// ForwardDFlash runs the target model forward pass and captures intermediate
+// hidden states at the specified layer IDs for DFlash speculative decoding.
+// Returns the final logits and the concatenated hidden states from the
+// requested layers.
+func (m *Model) ForwardDFlash(ctx ml.Context, batch input.Batch, layerIDs []int) (ml.Tensor, ml.Tensor) {
+	positions := m.buildPositions(ctx, batch)
+
+	hiddenStates := m.TokenEmbedding.Forward(ctx, batch.Inputs)
+
+	// Build a set of layer IDs to capture for O(1) lookup
+	captureSet := make(map[int]bool, len(layerIDs))
+	for _, id := range layerIDs {
+		captureSet[id] = true
+	}
+
+	cache := m.Cache.(*HybridCache)
+	m.Options.masks = nil
+
+	var capturedHidden []ml.Tensor
+
+	for i, layer := range m.Layers {
+		cache.SetLayer(i)
+
+		var outputs ml.Tensor
+		if i == len(m.Layers)-1 {
+			outputs = batch.Outputs
+		}
+
+		var err error
+		hiddenStates, err = layer.Forward(ctx, i, hiddenStates, positions, outputs, cache, m.Options)
+		if err != nil {
+			return nil, nil
+		}
+
+		// Capture hidden state at the requested layers
+		if captureSet[i] {
+			capturedHidden = append(capturedHidden, hiddenStates)
+		}
+	}
+
+	hiddenStates = m.OutputNorm.Forward(ctx, hiddenStates, m.eps)
+	logits := m.Output.Forward(ctx, hiddenStates)
+
+	// Concatenate captured hidden states along the hidden dimension
+	var concatenated ml.Tensor
+	for i, h := range capturedHidden {
+		if i == 0 {
+			concatenated = h
+		} else {
+			concatenated = concatenated.Concat(ctx, h, 0)
+		}
+	}
+
+	return logits, concatenated
+}
+
 func (m *Model) Validate() error {
 	if m.Options == nil {
 		return fmt.Errorf("qwen3next: missing model options")
