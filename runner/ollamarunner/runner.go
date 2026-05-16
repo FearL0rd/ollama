@@ -803,7 +803,7 @@ func (s *Server) computeBatch(activeBatch batchState) {
 				// runDFlashDecode will handle all future tokens for this sequence.
 				seqIdx := i
 				go func() {
-					if err := s.runDFlashDecode(context.Background(), seq); err != nil {
+					if err := s.runDFlashDecode(context.Background(), seq, token); err != nil {
 						slog.Error("DFlash decode failed", "error", err)
 					}
 					s.mu.Lock()
