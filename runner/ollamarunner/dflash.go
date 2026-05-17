@@ -22,6 +22,11 @@ type DFlashTargetModel interface {
 	// Returns the final logits tensor and the concatenated hidden states
 	// from the requested layers.
 	ForwardDFlash(ctx ml.Context, batch input.Batch, layerIDs []int) (logits ml.Tensor, capturedHidden ml.Tensor)
+
+	// ProjectHiddenToLogits projects draft model hidden states to logits
+	// using the target model's output projection. The hidden tensor must
+	// be on the target model's backend.
+	ProjectHiddenToLogits(ctx ml.Context, hidden ml.Tensor) ml.Tensor
 }
 
 // DFlashDraftModel is an interface for DFlash block-diffusion draft models.
@@ -47,14 +52,14 @@ type DFlashDraftModel interface {
 
 // dflashStats tracks speculative decoding statistics.
 type dflashStats struct {
-	iterations        int
-	drafted           int
-	accepted          int
-	mismatches        int
-	allAccepted       int
-	targetDuration    time.Duration
-	draftDuration     time.Duration
-	validateDuration  time.Duration
+	iterations       int
+	drafted          int
+	accepted         int
+	mismatches       int
+	allAccepted      int
+	targetDuration   time.Duration
+	draftDuration    time.Duration
+	validateDuration time.Duration
 }
 
 // dflashDecodeMode indicates whether DFlash is active and in which mode.
@@ -97,6 +102,7 @@ func (s *Server) dflashGate(temperature float32) (dflashDecodeMode, string) {
 // draft models serially.
 //
 // The loop:
+//
 //  1. Prefill target model on the prompt tokens
 //  2. For each decode step:
 //     a. Run target forward → capture hidden states at target_layer_ids
@@ -152,32 +158,38 @@ func (s *Server) runDFlashDecode(
 		return false, nil
 	}
 
-	// targetForward runs the target model forward on the given tokens and
-	// captures hidden states at the specified layer IDs.
-	targetForward := func(tokens []int32) (ml.Tensor, ml.Tensor) {
+	// targetForward runs the target model forward on the given tokens,
+	// computes the graph, and returns logits, captured hidden states,
+	// and the backend context. The caller MUST close the context after
+	// reading logits and after capturedHidden is consumed (e.g. by
+	// generateDraftTokens which reads it as a GPU tensor).
+	targetForward := func(tokens []int32) (logits ml.Tensor, capturedHidden ml.Tensor, ctx ml.Context) {
 		t0 := time.Now()
-		batchCtx := s.model.Backend().NewContext()
-		defer batchCtx.Close()
+		ctx = s.model.Backend().NewContext()
 
-		batch := input.Batch{
-			Inputs:    batchCtx.Input().FromInts(tokens, len(tokens)),
+		block := input.Batch{
+			Inputs:    ctx.Input().FromInts(tokens, len(tokens)),
 			Positions: make([]int32, len(tokens)),
 			Sequences: make([]int, len(tokens)),
 		}
 		for i := range tokens {
-			batch.Positions[i] = position + int32(i)
-			batch.Sequences[i] = seq.cache.Id
+			block.Positions[i] = position + int32(i)
+			block.Sequences[i] = seq.cache.Id
 		}
 
-		logits, capturedHidden := target.ForwardDFlash(batchCtx, batch, layerIDs)
+		logits, capturedHidden = target.ForwardDFlash(ctx, block, layerIDs)
+		ctx.Forward(logits, capturedHidden)
+		ctx.Compute(logits, capturedHidden)
 		position += int32(len(tokens))
 		stats.targetDuration += time.Since(t0)
-		return logits, capturedHidden
+		return
 	}
 
-	// generateDraftTokens creates block_size-1 draft tokens using the
-	// draft model. It projects the captured target hidden states into
-	// draft space, then runs the draft model forward on the block input.
+	// generateDraftTokens generates draft tokens using the draft model.
+	// It projects captured target hidden states into draft space, runs
+	// the draft model forward (which returns hidden states, not logits),
+	// then projects those hidden states to logits using the target model's
+	// output projection.
 	generateDraftTokens := func(capturedHidden ml.Tensor, currentToken int32, draftCount int, draftPosition int32) []int32 {
 		t0 := time.Now()
 
@@ -189,62 +201,90 @@ func (s *Server) runDFlashDecode(
 			blockTokens[i] = draft.MaskTokenID()
 		}
 
-		// Create a context on the draft model's backend
+		// Create a context on the draft model's backend.
+		// IMPORTANT: call Input() FIRST to set buft before any FromFloats
+		// or other tensor creation (ggml requires buft for newTensor).
 		draftCtx := s.draftModel.Backend().NewContext()
 		defer draftCtx.Close()
+		draftInputCtx := draftCtx.Input()
 
-		// Project target hidden states into draft space.
-		// The projected hidden is used to initialize the draft model's
-		// internal state before the block forward pass.
-		_ = draft.ForwardDFlashContext(draftCtx, capturedHidden)
+		// Copy captured hidden states to draft backend.
+		// capturedHidden lives in GPU memory on the target backend, but the
+		// draft model runs on CPU. Reading via Floats() forces GPU→CPU copy,
+		// then FromFloats creates a new tensor on the draft model's backend.
+		hiddenShape := capturedHidden.Shape()
+		hiddenFloats := capturedHidden.Floats()
+		capturedForDraft := draftInputCtx.FromFloats(hiddenFloats, hiddenShape...)
+
+		// Project target hidden states into draft space and store in
+		// the draft model's projectedHidden field for use by Forward.
+		draft.ForwardDFlashContext(draftCtx, capturedForDraft)
 
 		// Build the batch for the draft model forward pass.
-		// The draft model processes the entire block in one forward call.
-		batch := input.Batch{
+		block := input.Batch{
 			Inputs:    draftCtx.Input().FromInts(blockTokens, blockLen),
 			Positions: make([]int32, blockLen),
 			Sequences: make([]int, blockLen),
 		}
 		for i := range blockLen {
-			batch.Positions[i] = draftPosition + int32(i)
-			batch.Sequences[i] = 0 // draft uses slot 0
+			block.Positions[i] = draftPosition + int32(i)
+			block.Sequences[i] = 0 // draft uses slot 0
 		}
 
 		// Start forward on the draft model's cache
 		draftCache := s.draftModel.Config().Cache
 		if draftCache != nil {
-			if err := draftCache.StartForward(draftCtx, batch, false); err != nil {
+			if err := draftCache.StartForward(draftCtx, block, false); err != nil {
 				slog.Error("dflash: draft cache start forward failed", "error", err)
 				stats.draftDuration += time.Since(t0)
 				return nil
 			}
 		}
 
-		// Run draft model forward
-		logits, err := s.draftModel.Forward(draftCtx, batch)
+		// Run draft model forward — returns hidden states because the
+		// draft model has no output projection.
+		hidden, err := s.draftModel.Forward(draftCtx, block)
 		if err != nil {
 			slog.Error("dflash: draft forward failed", "error", err)
 			stats.draftDuration += time.Since(t0)
 			return nil
 		}
-		draftCtx.Forward(logits)
-		draftCtx.Compute(logits)
+		draftCtx.Forward(hidden)
+		draftCtx.Compute(hidden)
 
-		// Extract draft tokens from logits.
-		// The logits tensor has shape [vocab_size, blockLen].
-		// We take argmax for positions 1..blockLen (skipping position 0
-		// which corresponds to the input token).
-		outputs := logits.Floats()
-		vocabSize := logits.Dim(0)
-		if vocabSize == 0 || len(outputs) == 0 {
-			slog.Error("dflash: draft forward produced no output")
+		// Read hidden states from draft backend.
+		hiddenFloats = hidden.Floats()
+		hiddenShape = hidden.Shape()
+		if len(hiddenFloats) == 0 || len(hiddenShape) < 2 {
+			slog.Error("dflash: draft forward produced no hidden states")
 			stats.draftDuration += time.Since(t0)
 			return nil
 		}
 
+		// Copy hidden states to target backend and project to logits.
+		// CRITICAL: allocate on GPU so ProjectHiddenToLogits can Mulmat
+		// with GPU weights without cross-device copy (SIGSEGV).
+		targetCtx := s.model.Backend().NewContext()
+		gpuCtx := targetCtx.Layer(0)
+		targetHidden := gpuCtx.Empty(ml.DTypeF32, hiddenShape...)
+		targetHidden.FromFloats(hiddenFloats)
+		logits := target.ProjectHiddenToLogits(targetCtx, targetHidden)
+		targetCtx.Forward(logits)
+		targetCtx.Compute(logits)
+
+		// Extract draft tokens from projected logits.
+		outputs := logits.Floats()
+		vocabSize := logits.Dim(0)
+		if vocabSize == 0 || len(outputs) == 0 {
+			targetCtx.Close()
+			slog.Error("dflash: draft forward projection produced no logits")
+			stats.draftDuration += time.Since(t0)
+			return nil
+		}
+		targetCtx.Close()
+
 		result := make([]int32, draftCount)
 		for i := range draftCount {
-			// Position i+1 in the block (0-indexed: position 0 is the input token)
 			offset := (i + 1) * vocabSize
 			if offset+vocabSize > len(outputs) {
 				break
@@ -266,35 +306,30 @@ func (s *Server) runDFlashDecode(
 			stats.validateDuration += time.Since(t0)
 		}()
 
-		// Run target forward on current token to get its prediction
-		logits, capturedHidden := targetForward([]int32{currentToken})
-		_ = capturedHidden
-
-		// Get target's prediction for the next token
+		// Run target forward on current token to get its prediction.
+		// capturedHidden is not needed here (it's only used for draft generation,
+		// not during verification of already-generated draft tokens).
+		logits, _, targetCtx := targetForward([]int32{currentToken})
 		outputs := logits.Floats()
+		targetCtx.Close()
 		if len(outputs) == 0 {
 			return 0, 0, false, fmt.Errorf("dflash: target forward produced no output")
 		}
 
-		// Get argmax token from logits (greedy)
 		vocabSize := len(outputs)
 		targetToken := argmaxToken(outputs, vocabSize)
 
 		for _, draftToken := range draftTokens {
-			// The target's prediction should match the draft token
 			if targetToken != draftToken {
-				// Mismatch: return the target's token as the next token
 				return accepted, targetToken, false, nil
 			}
 
 			accepted++
 
-			// Check if this is an EOS token
 			if tok.Is(draftToken, tokenizer.SpecialEOS) {
 				return accepted, draftToken, true, nil
 			}
 
-			// Emit the accepted draft token
 			stop, err := emitToken(draftToken)
 			if err != nil {
 				return accepted, draftToken, stop, err
@@ -308,8 +343,9 @@ func (s *Server) runDFlashDecode(
 			}
 
 			// Run target forward on this accepted token to get next prediction
-			logits, capturedHidden = targetForward([]int32{draftToken})
+			logits, _, targetCtx = targetForward([]int32{draftToken})
 			outputs = logits.Floats()
+			targetCtx.Close()
 			if len(outputs) == 0 {
 				return accepted, draftToken, false, fmt.Errorf("dflash: target forward produced no output")
 			}
@@ -326,16 +362,17 @@ func (s *Server) runDFlashDecode(
 			return err
 		}
 
-		// Calculate how many draft tokens to generate
 		draftCount := int(blockSize) - 1
 		remaining := numPredict - generated
 		if draftCount > remaining {
 			draftCount = remaining
 		}
 		if draftCount <= 0 {
-			// No room for drafting, just do a regular decode step
-			logits, _ := targetForward([]int32{0}) // placeholder — will be filled with actual token
+			// No room for drafting, just do a regular decode step.
+			// capturedHidden is discarded since there's no draft to generate.
+			logits, _, targetCtx := targetForward([]int32{0})
 			outputs := logits.Floats()
+			targetCtx.Close()
 			if len(outputs) == 0 {
 				return fmt.Errorf("dflash: target forward produced no output")
 			}
@@ -358,24 +395,30 @@ func (s *Server) runDFlashDecode(
 		stats.iterations++
 
 		// Run target forward on the current token to get logits
-		// and captured hidden states for draft model context
-		logits, capturedHidden := targetForward([]int32{0}) // will use actual current token below
+		// and captured hidden states for draft model context.
+		// The context MUST stay alive until generateDraftTokens returns
+		// because capturedHidden is a GPU tensor used as input there.
+		logits, capturedHidden, targetCtx := targetForward([]int32{0})
 		outputs := logits.Floats()
 		if len(outputs) == 0 {
+			targetCtx.Close()
 			return fmt.Errorf("dflash: target forward produced no output")
 		}
 		currentToken := argmaxToken(outputs, len(outputs))
 
-		// Check if the target token is EOS
 		if tok.Is(currentToken, tokenizer.SpecialEOS) {
+			targetCtx.Close()
 			return nil
 		}
 
-		// Generate draft tokens using the draft model
+		// Generate draft tokens using the draft model.
+		// capturedHidden is consumed by generateDraftTokens, which copies
+		// the data from GPU to CPU or processes it within its own context.
 		draftTokens := generateDraftTokens(capturedHidden, currentToken, draftCount, position)
+		// Close the target context now that capturedHidden is no longer needed
+		targetCtx.Close()
 
 		if len(draftTokens) > 0 {
-			// Verify draft tokens against the target model
 			accepted, nextToken, done, err := verifyDraftTokens(draftTokens, currentToken)
 			if err != nil {
 				return err
@@ -466,15 +509,20 @@ func argmaxToken(logits []float32, vocabSize int) int32 {
 }
 
 // loadDraftModel loads a DFlash draft model from the given GGUF path.
-// It creates a separate model instance, loads weights, and creates a
-// KV cache for the draft model.
+// It creates a separate model instance and verifies the architecture,
+// but does NOT load weights into memory — that happens in loadDraftWeights
+// after the target model's weights are loaded, to avoid CUDA state conflicts
+// from multiple backends loading in the same process.
 func (s *Server) loadDraftModel(path string, params ml.BackendParams) error {
-	slog.Info("loading draft model", "path", path)
+	slog.Info("loading draft model (metadata only)", "path", path)
 
-	// Load the draft model using the same path as the target model.
-	// model.New() reads the GGUF file, creates a backend, determines
-	// the architecture (should be "dflash"), and populates tensors.
-	draftModel, err := model.New(path, params)
+	// Use CPU-only params for the draft model — it's small and the target
+	// model's GPU layer allocation (e.g. 65 layers across 2 GPUs) doesn't
+	// apply to the draft model's different architecture.
+	draftParams := params
+	draftParams.GPULayers = nil
+
+	draftModel, err := model.New(path, draftParams)
 	if err != nil {
 		return fmt.Errorf("dflash: failed to create draft model: %w", err)
 	}
@@ -486,41 +534,53 @@ func (s *Server) loadDraftModel(path string, params ml.BackendParams) error {
 		return fmt.Errorf("dflash: draft model architecture %q does not implement DFlashDraftModel", draftModel.Config().Cache)
 	}
 
-	// Load the draft model weights into GPU memory
-	err = draftModel.Backend().Load(context.TODO(), func(progress float32) {
-		slog.Info("loading draft model weights", "progress", progress)
-	})
-	if err != nil {
-		draftModel.Backend().Close()
-		return fmt.Errorf("dflash: failed to load draft model weights: %w", err)
-	}
-
-	// Run post-load initialization if the draft model supports it
-	if postLoader, ok := draftModel.(model.PostLoader); ok {
-		if err := postLoader.PostLoad(); err != nil {
-			draftModel.Backend().Close()
-			return fmt.Errorf("dflash: draft model post-load failed: %w", err)
-		}
-	}
-
-	// Create an InputCache for the draft model.
-	// The draft model uses a single slot (serial decode) with a smaller
-	// context window since it only needs to cache block_size tokens.
-	draftCache, err := NewInputCache(draftModel, "f16", int32(s.cache.numCtx), 1, s.batchSize, false)
-	if err != nil {
-		draftModel.Backend().Close()
-		return fmt.Errorf("dflash: failed to create draft cache: %w", err)
-	}
-
 	s.draftModel = draftModel
-	s.draftCache = draftCache
-
-	slog.Info("draft model loaded",
+	slog.Info("draft model metadata loaded",
 		"path", path,
 		"block_size", draft.BlockSize(),
 		"target_layers", draft.TargetLayerIDs(),
 		"mask_token_id", draft.MaskTokenID(),
 	)
+	return nil
+}
+
+// loadDraftWeights loads the draft model weights and creates its cache.
+// Must be called BEFORE the target model weights are loaded so that the
+// target model's scheduler is created last with a clean CUDA state.
+// The ggml CUDA backend shares process-global device handles, so loading
+// weights after the target model has built its scheduler corrupts the
+// target's GPU scratch buffers (SIGSEGV in computeBatch).
+func (s *Server) loadDraftWeights() error {
+	if s.draftModel == nil || s.draftCache != nil {
+		return nil // already loaded or no draft model
+	}
+
+	slog.Info("loading draft model weights")
+	if err := s.draftModel.Backend().Load(context.TODO(), func(progress float32) {
+		slog.Info("loading draft model weights", "progress", progress)
+	}); err != nil {
+		s.draftModel.Backend().Close()
+		s.draftModel = nil
+		return fmt.Errorf("dflash: failed to load draft model weights: %w", err)
+	}
+
+	if postLoader, ok := s.draftModel.(model.PostLoader); ok {
+		if err := postLoader.PostLoad(); err != nil {
+			s.draftModel.Backend().Close()
+			s.draftModel = nil
+			return fmt.Errorf("dflash: draft model post-load failed: %w", err)
+		}
+	}
+
+	cache, err := NewInputCache(s.draftModel, "f16", int32(s.cache.numCtx), 1, s.batchSize, false)
+	if err != nil {
+		s.draftModel.Backend().Close()
+		s.draftModel = nil
+		return fmt.Errorf("dflash: failed to create draft cache: %w", err)
+	}
+	s.draftCache = cache
+
+	slog.Info("draft model weights loaded")
 	return nil
 }
 
